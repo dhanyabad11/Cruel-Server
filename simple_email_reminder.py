@@ -5,11 +5,10 @@ Run this with: python simple_email_reminder.py
 """
 import os
 import time
-import asyncio
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from supabase import create_client
-import httpx
+import requests
+import json
 
 load_dotenv()
 
@@ -35,9 +34,14 @@ if not SENDGRID_API_KEY:
 print(f"✓ Config loaded - Supabase: {SUPABASE_URL[:30]}...")
 print(f"✓ SendGrid from: {SENDGRID_FROM_EMAIL}")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+# Supabase headers for REST API
+SUPABASE_HEADERS = {
+    "apikey": SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type": "application/json"
+}
 
-async def send_email(to_email, subject, body):
+def send_email(to_email, subject, body):
     """Send email via SendGrid"""
     url = "https://api.sendgrid.com/v3/mail/send"
     payload = {
@@ -49,55 +53,63 @@ async def send_email(to_email, subject, body):
         "Authorization": f"Bearer {SENDGRID_API_KEY}",
         "Content-Type": "application/json"
     }
-    async with httpx.AsyncClient() as client:
-        response = await client.post(url, json=payload, headers=headers)
-        if response.status_code in [200, 202]:
-            print(f"✓ Email sent to {to_email}")
-            return True
-        else:
-            print(f"✗ Email failed: {response.status_code} - {response.text}")
-            return False
+    response = requests.post(url, json=payload, headers=headers)
+    if response.status_code in [200, 202]:
+        print(f"✓ Email sent to {to_email}")
+        return True
+    else:
+        print(f"✗ Email failed: {response.status_code} - {response.text}")
+        return False
 
-async def check_and_send_reminders():
+def check_and_send_reminders():
     """Check deadlines and send email reminders based on user settings"""
     print(f"\n[{datetime.now()}] Checking for deadlines...")
     
     try:
-        # Get users with email enabled
-        settings = supabase.table('notification_settings').select('*').eq('email_enabled', True).execute()
+        # Get users with email enabled using REST API
+        settings_url = f"{SUPABASE_URL}/rest/v1/notification_settings?email_enabled=eq.true&select=*"
+        settings_response = requests.get(settings_url, headers=SUPABASE_HEADERS)
+        settings = settings_response.json()
         
-        if not settings.data:
+        if not settings:
             print("No users with email enabled")
             return
         
-        print(f"Found {len(settings.data)} users with email enabled")
+        print(f"Found {len(settings)} users with email enabled")
         
-        for setting in settings.data:
+        for setting in settings:
             user_id = setting['user_id']
             
-            # Get user email
-            user = supabase.table('users').select('email').eq('id', user_id).execute()
-            if not user.data:
+            # Get user email using REST API
+            user_url = f"{SUPABASE_URL}/rest/v1/users?id=eq.{user_id}&select=email"
+            user_response = requests.get(user_url, headers=SUPABASE_HEADERS)
+            user_data = user_response.json()
+            
+            if not user_data:
                 continue
             
-            email = user.data[0]['email']
+            email = user_data[0]['email']
             
             # Get pending deadlines for this user
-            deadlines = supabase.table('deadlines').select('*').eq('user_id', user_id).execute()
+            deadlines_url = f"{SUPABASE_URL}/rest/v1/deadlines?user_id=eq.{user_id}&select=*"
+            deadlines_response = requests.get(deadlines_url, headers=SUPABASE_HEADERS)
+            deadlines = deadlines_response.json()
             
             now = datetime.utcnow()
             
-            for deadline in deadlines.data:
+            for deadline in deadlines:
                 deadline_id = deadline['id']
                 deadline_date = datetime.fromisoformat(deadline['deadline_date'].replace('Z', '+00:00')).replace(tzinfo=None)
                 
                 # Get reminder settings for this deadline
-                reminders = supabase.table('notification_reminders').select('*').eq('deadline_id', deadline_id).execute()
+                reminders_url = f"{SUPABASE_URL}/rest/v1/notification_reminders?deadline_id=eq.{deadline_id}&select=*"
+                reminders_response = requests.get(reminders_url, headers=SUPABASE_HEADERS)
+                reminders = reminders_response.json()
                 
-                if not reminders.data:
+                if not reminders:
                     continue
                 
-                for reminder in reminders.data:
+                for reminder in reminders:
                     # Skip if already sent
                     if reminder.get('sent'):
                         continue
@@ -124,11 +136,13 @@ async def check_and_send_reminders():
                         subject = f"⏰ Deadline Reminder: {deadline['title']}"
                         body = f"Hi!\n\nReminder: Your deadline '{deadline['title']}' is coming up on {deadline_date}.\n\nDescription: {deadline.get('description', 'N/A')}\n\nTime remaining: {reminder_type.replace('_', ' ')}\n\nStay on track!"
                         
-                        sent = await send_email(email, subject, body)
+                        sent = send_email(email, subject, body)
                         
                         if sent:
-                            # Mark as sent
-                            supabase.table('notification_reminders').update({'sent': True}).eq('id', reminder['id']).execute()
+                            # Mark as sent using REST API
+                            update_url = f"{SUPABASE_URL}/rest/v1/notification_reminders?id=eq.{reminder['id']}"
+                            update_data = {"sent": True}
+                            requests.patch(update_url, json=update_data, headers=SUPABASE_HEADERS)
                             print(f"Marked reminder {reminder['id']} as sent")
         
         print("Done checking deadlines")
@@ -138,15 +152,15 @@ async def check_and_send_reminders():
         import traceback
         traceback.print_exc()
 
-async def main():
+def main():
     """Run forever, checking every 5 minutes"""
     print("🚀 Simple Email Reminder Started!")
     print(f"Checking deadlines every 5 minutes...")
     
     while True:
-        await check_and_send_reminders()
+        check_and_send_reminders()
         print("Sleeping for 5 minutes...")
-        await asyncio.sleep(300)  # 5 minutes
+        time.sleep(300)  # 5 minutes
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
