@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, timedelta
 from supabase import Client
@@ -7,8 +7,30 @@ from app.models.user import User
 from app.models.deadline import StatusLevel
 from app.schemas.deadline import DeadlineCreate, DeadlineUpdate, DeadlineResponse, DeadlineStats
 from app.auth_deps import get_current_user
+from app.services.email_service import send_email
 
 router = APIRouter(tags=["deadlines"])
+
+async def schedule_email_reminders(deadline_id: int, user_email: str, deadline_title: str, deadline_date: str, supabase: Client):
+    """Schedule email reminders based on user settings"""
+    try:
+        # Get user's notification settings
+        settings = supabase.table('notification_settings').select('*').eq('user_id', deadline_id).execute()
+        
+        if settings.data and settings.data[0].get('email_enabled'):
+            # Create reminder records in database
+            reminder_types = ['1_hour', '1_day']  # Default reminders
+            
+            for reminder_type in reminder_types:
+                supabase.table('notification_reminders').insert({
+                    'deadline_id': deadline_id,
+                    'reminder_type': reminder_type,
+                    'sent': False
+                }).execute()
+            
+            print(f"✓ Scheduled {len(reminder_types)} email reminders for deadline: {deadline_title}")
+    except Exception as e:
+        print(f"✗ Failed to schedule reminders: {e}")
 
 @router.get("/")
 async def get_deadlines(
@@ -47,6 +69,7 @@ async def get_deadlines(
 @router.post("/")
 async def create_deadline(
     deadline_data: dict,
+    background_tasks: BackgroundTasks,
     current_user: Dict[str, Any] = Depends(get_current_user),
     supabase: Client = Depends(get_supabase_client)
 ):
@@ -75,6 +98,16 @@ async def create_deadline(
             
         created_deadline = result.data[0]
         print(f"DEBUG: Successfully created deadline: {created_deadline}")
+        
+        # Schedule email reminders in background
+        background_tasks.add_task(
+            schedule_email_reminders,
+            created_deadline['id'],
+            current_user.get('email'),
+            created_deadline['title'],
+            created_deadline['due_date'],
+            supabase
+        )
         
         return created_deadline
         
