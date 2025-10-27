@@ -45,7 +45,7 @@ async def send_email(to_email, subject, body):
             return False
 
 async def check_and_send_reminders():
-    """Check deadlines and send email reminders"""
+    """Check deadlines and send email reminders based on user settings"""
     print(f"\n[{datetime.now()}] Checking for deadlines...")
     
     try:
@@ -68,26 +68,54 @@ async def check_and_send_reminders():
             
             email = user.data[0]['email']
             
-            # Get deadlines for this user
+            # Get pending deadlines for this user
             deadlines = supabase.table('deadlines').select('*').eq('user_id', user_id).execute()
             
             now = datetime.utcnow()
             
             for deadline in deadlines.data:
+                deadline_id = deadline['id']
                 deadline_date = datetime.fromisoformat(deadline['deadline_date'].replace('Z', '+00:00')).replace(tzinfo=None)
-                time_until = deadline_date - now
                 
-                # Check if we should send 1 day reminder
-                if timedelta(hours=23, minutes=55) <= time_until <= timedelta(hours=24, minutes=5):
-                    subject = f"⏰ Deadline Tomorrow: {deadline['title']}"
-                    body = f"Hi!\n\nYour deadline '{deadline['title']}' is tomorrow at {deadline_date}.\n\nDescription: {deadline.get('description', 'N/A')}\n\nDon't forget!"
-                    await send_email(email, subject, body)
+                # Get reminder settings for this deadline
+                reminders = supabase.table('notification_reminders').select('*').eq('deadline_id', deadline_id).execute()
                 
-                # Check if we should send 1 hour reminder
-                elif timedelta(minutes=55) <= time_until <= timedelta(hours=1, minutes=5):
-                    subject = f"🚨 Deadline in 1 Hour: {deadline['title']}"
-                    body = f"Hi!\n\nYour deadline '{deadline['title']}' is in 1 HOUR at {deadline_date}.\n\nDescription: {deadline.get('description', 'N/A')}\n\nHurry!"
-                    await send_email(email, subject, body)
+                if not reminders.data:
+                    continue
+                
+                for reminder in reminders.data:
+                    # Skip if already sent
+                    if reminder.get('sent'):
+                        continue
+                    
+                    reminder_type = reminder['reminder_type']  # 1_hour, 1_day, 1_week, etc.
+                    
+                    # Calculate when to send based on reminder type
+                    time_map = {
+                        '1_hour': timedelta(hours=1),
+                        '1_day': timedelta(days=1),
+                        '1_week': timedelta(weeks=1),
+                        '2_weeks': timedelta(weeks=2),
+                        '1_month': timedelta(days=30)
+                    }
+                    
+                    time_before = time_map.get(reminder_type)
+                    if not time_before:
+                        continue
+                    
+                    time_until = deadline_date - now
+                    
+                    # Send if within 5 minutes of the reminder time
+                    if abs(time_until - time_before) <= timedelta(minutes=5):
+                        subject = f"⏰ Deadline Reminder: {deadline['title']}"
+                        body = f"Hi!\n\nReminder: Your deadline '{deadline['title']}' is coming up on {deadline_date}.\n\nDescription: {deadline.get('description', 'N/A')}\n\nTime remaining: {reminder_type.replace('_', ' ')}\n\nStay on track!"
+                        
+                        sent = await send_email(email, subject, body)
+                        
+                        if sent:
+                            # Mark as sent
+                            supabase.table('notification_reminders').update({'sent': True}).eq('id', reminder['id']).execute()
+                            print(f"Marked reminder {reminder['id']} as sent")
         
         print("Done checking deadlines")
         
