@@ -21,6 +21,20 @@ SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "dhanyabadbehera@gmail.co
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 
+# Validate config
+if not SUPABASE_URL or not SUPABASE_KEY:
+    print(f"ERROR: Missing Supabase config!")
+    print(f"SUPABASE_URL: {SUPABASE_URL}")
+    print(f"SUPABASE_KEY: {'SET' if SUPABASE_KEY else 'MISSING'}")
+    exit(1)
+
+if not SENDGRID_API_KEY:
+    print(f"ERROR: Missing SendGrid API key!")
+    exit(1)
+
+print(f"✓ Config loaded - Supabase: {SUPABASE_URL[:30]}...")
+print(f"✓ SendGrid from: {SENDGRID_FROM_EMAIL}")
+
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 async def send_email(to_email, subject, body):
