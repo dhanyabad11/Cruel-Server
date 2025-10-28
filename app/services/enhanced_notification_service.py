@@ -113,7 +113,7 @@ class EnhancedNotificationService:
                                     body: str,
                                     html_body: Optional[str] = None) -> Dict[str, Any]:
         """
-        Send email notification using SendGrid API.
+        Send email notification using Twilio SendGrid.
         
         Args:
             to_email: Recipient email address
@@ -125,6 +125,9 @@ class EnhancedNotificationService:
             Dict containing notification result
         """
         try:
+            from sendgrid import SendGridAPIClient
+            from sendgrid.helpers.mail import Mail, Content
+            
             # Get SendGrid credentials
             sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
             from_email = os.getenv("SENDGRID_FROM_EMAIL", self.smtp_username)
@@ -132,37 +135,25 @@ class EnhancedNotificationService:
             if not sendgrid_api_key:
                 raise ValueError("SENDGRID_API_KEY environment variable is required")
             
-            # SendGrid API endpoint
-            url = "https://api.sendgrid.com/v3/mail/send"
+            # Initialize Twilio SendGrid
+            sg = SendGridAPIClient(sendgrid_api_key)
             
-            # Build email payload
-            content = [{"type": "text/plain", "value": body}]
+            # Build email message
+            message = Mail(
+                from_email=from_email,
+                to_emails=to_email,
+                subject=subject,
+                plain_text_content=body
+            )
+            
+            # Add HTML content if provided
             if html_body:
-                content.append({"type": "text/html", "value": html_body})
+                message.add_content(Content("text/html", html_body))
             
-            payload = {
-                "personalizations": [
-                    {
-                        "to": [{"email": to_email}],
-                        "subject": subject
-                    }
-                ],
-                "from": {"email": from_email},
-                "content": content
-            }
+            # Send email
+            response = sg.send(message)
             
-            headers = {
-                "Authorization": f"Bearer {sendgrid_api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=payload, headers=headers)
-                
-                if response.status_code not in [200, 202]:
-                    raise Exception(f"SendGrid API error: {response.status_code} - {response.text}")
-            
-            self.logger.info(f"Email sent successfully to {to_email} via SendGrid")
+            self.logger.info(f"Email sent successfully to {to_email} via Twilio SendGrid")
             return {
                 "success": True,
                 "message": "Email sent successfully",

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Simple email reminder - no Redis, no Celery, just works
+Simple email reminder using Twilio SendGrid - super simple!
 Run this with: python simple_email_reminder.py
 """
 import os
 import time
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from sendgrid import SendGridAPIClient
+from sendgrid.helpers.mail import Mail
 import requests
-import json
 
 load_dotenv()
 
-# SendGrid config
+# Twilio SendGrid config
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "dhanyabadbehera@gmail.com")
 
@@ -23,8 +24,6 @@ SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
 # Validate config
 if not SUPABASE_URL or not SUPABASE_KEY:
     print(f"ERROR: Missing Supabase config!")
-    print(f"SUPABASE_URL: {SUPABASE_URL}")
-    print(f"SUPABASE_KEY: {'SET' if SUPABASE_KEY else 'MISSING'}")
     exit(1)
 
 if not SENDGRID_API_KEY:
@@ -32,7 +31,7 @@ if not SENDGRID_API_KEY:
     exit(1)
 
 print(f"✓ Config loaded - Supabase: {SUPABASE_URL[:30]}...")
-print(f"✓ SendGrid from: {SENDGRID_FROM_EMAIL}")
+print(f"✓ Twilio SendGrid from: {SENDGRID_FROM_EMAIL}")
 
 # Supabase headers for REST API
 SUPABASE_HEADERS = {
@@ -41,24 +40,23 @@ SUPABASE_HEADERS = {
     "Content-Type": "application/json"
 }
 
+# Initialize Twilio SendGrid client
+sg = SendGridAPIClient(SENDGRID_API_KEY)
+
 def send_email(to_email, subject, body):
-    """Send email via SendGrid"""
-    url = "https://api.sendgrid.com/v3/mail/send"
-    payload = {
-        "personalizations": [{"to": [{"email": to_email}], "subject": subject}],
-        "from": {"email": SENDGRID_FROM_EMAIL},
-        "content": [{"type": "text/plain", "value": body}]
-    }
-    headers = {
-        "Authorization": f"Bearer {SENDGRID_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    response = requests.post(url, json=payload, headers=headers)
-    if response.status_code in [200, 202]:
+    """Send email via Twilio SendGrid - super simple!"""
+    try:
+        message = Mail(
+            from_email=SENDGRID_FROM_EMAIL,
+            to_emails=to_email,
+            subject=subject,
+            plain_text_content=body
+        )
+        response = sg.send(message)
         print(f"✓ Email sent to {to_email}")
         return True
-    else:
-        print(f"✗ Email failed: {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"✗ Email failed: {e}")
         return False
 
 def check_and_send_reminders():
