@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple email reminder using Twilio SendGrid - super simple!
+Simple email reminder using Twilio SendGrid + Neon PostgreSQL
 Run this with: python simple_email_reminder.py
 """
 import os
@@ -9,7 +9,8 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from sendgrid import SendGridAPIClient
 from sendgrid.helpers.mail import Mail
-import requests
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import sessionmaker
 
 load_dotenv()
 
@@ -17,28 +18,24 @@ load_dotenv()
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 SENDGRID_FROM_EMAIL = os.getenv("SENDGRID_FROM_EMAIL", "dhanyabadbehera@gmail.com")
 
-# Supabase config
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")
+# Neon PostgreSQL config
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Validate config
-if not SUPABASE_URL or not SUPABASE_KEY:
-    print(f"ERROR: Missing Supabase config!")
+if not DATABASE_URL:
+    print(f"ERROR: Missing DATABASE_URL!")
     exit(1)
 
 if not SENDGRID_API_KEY:
     print(f"ERROR: Missing SendGrid API key!")
     exit(1)
 
-print(f"✓ Config loaded - Supabase: {SUPABASE_URL[:30]}...")
+print(f"✓ Config loaded - Database: {DATABASE_URL[:50]}...")
 print(f"✓ Twilio SendGrid from: {SENDGRID_FROM_EMAIL}")
 
-# Supabase headers for REST API
-SUPABASE_HEADERS = {
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
-}
+# Create database connection
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(bind=engine)
 
 # Initialize Twilio SendGrid client
 sg = SendGridAPIClient(SENDGRID_API_KEY)
@@ -63,11 +60,17 @@ def check_and_send_reminders():
     """Check deadlines and send email reminders based on user settings"""
     print(f"\n[{datetime.now()}] Checking for deadlines...")
     
+    db = SessionLocal()
     try:
-        # Get users with email enabled using REST API
-        settings_url = f"{SUPABASE_URL}/rest/v1/notification_settings?email_enabled=eq.true&select=*"
-        settings_response = requests.get(settings_url, headers=SUPABASE_HEADERS)
-        settings = settings_response.json()
+        # Get users with email enabled
+        query = text("""
+            SELECT DISTINCT ns.user_id, u.email
+            FROM notification_settings ns
+            JOIN users u ON u.id = ns.user_id
+            WHERE ns.email_enabled = true
+        """)
+        
+        settings = db.execute(query).fetchall()
         
         if not settings:
             print("No users with email enabled")
@@ -75,44 +78,33 @@ def check_and_send_reminders():
         
         print(f"Found {len(settings)} users with email enabled")
         
-        for setting in settings:
-            user_id = setting['user_id']
-            
-            # Get user email using REST API
-            user_url = f"{SUPABASE_URL}/rest/v1/users?id=eq.{user_id}&select=email"
-            user_response = requests.get(user_url, headers=SUPABASE_HEADERS)
-            user_data = user_response.json()
-            
-            if not user_data:
-                continue
-            
-            email = user_data[0]['email']
-            
+        for user_id, email in settings:
             # Get pending deadlines for this user
-            deadlines_url = f"{SUPABASE_URL}/rest/v1/deadlines?user_id=eq.{user_id}&select=*"
-            deadlines_response = requests.get(deadlines_url, headers=SUPABASE_HEADERS)
-            deadlines = deadlines_response.json()
+            deadlines_query = text("""
+                SELECT id, title, description, due_date
+                FROM deadlines
+                WHERE user_id = :user_id
+            """)
+            deadlines = db.execute(deadlines_query, {"user_id": user_id}).fetchall()
             
             now = datetime.utcnow()
             
-            for deadline in deadlines:
-                deadline_id = deadline['id']
-                deadline_date = datetime.fromisoformat(deadline['deadline_date'].replace('Z', '+00:00')).replace(tzinfo=None)
-                
+            for deadline_id, title, description, due_date in deadlines:
                 # Get reminder settings for this deadline
-                reminders_url = f"{SUPABASE_URL}/rest/v1/notification_reminders?deadline_id=eq.{deadline_id}&select=*"
-                reminders_response = requests.get(reminders_url, headers=SUPABASE_HEADERS)
-                reminders = reminders_response.json()
+                reminders_query = text("""
+                    SELECT id, reminder_type, sent
+                    FROM notification_reminders
+                    WHERE deadline_id = :deadline_id
+                """)
+                reminders = db.execute(reminders_query, {"deadline_id": deadline_id}).fetchall()
                 
                 if not reminders:
                     continue
                 
-                for reminder in reminders:
+                for reminder_id, reminder_type, sent in reminders:
                     # Skip if already sent
-                    if reminder.get('sent'):
+                    if sent:
                         continue
-                    
-                    reminder_type = reminder['reminder_type']  # 1_hour, 1_day, 1_week, etc.
                     
                     # Calculate when to send based on reminder type
                     time_map = {
@@ -127,21 +119,25 @@ def check_and_send_reminders():
                     if not time_before:
                         continue
                     
-                    time_until = deadline_date - now
+                    time_until = due_date - now
                     
                     # Send if within 5 minutes of the reminder time
                     if abs(time_until - time_before) <= timedelta(minutes=5):
-                        subject = f"⏰ Deadline Reminder: {deadline['title']}"
-                        body = f"Hi!\n\nReminder: Your deadline '{deadline['title']}' is coming up on {deadline_date}.\n\nDescription: {deadline.get('description', 'N/A')}\n\nTime remaining: {reminder_type.replace('_', ' ')}\n\nStay on track!"
+                        subject = f"⏰ Deadline Reminder: {title}"
+                        body = f"Hi!\n\nReminder: Your deadline '{title}' is coming up on {due_date}.\n\nDescription: {description or 'N/A'}\n\nTime remaining: {reminder_type.replace('_', ' ')}\n\nStay on track!"
                         
-                        sent = send_email(email, subject, body)
+                        email_sent = send_email(email, subject, body)
                         
-                        if sent:
-                            # Mark as sent using REST API
-                            update_url = f"{SUPABASE_URL}/rest/v1/notification_reminders?id=eq.{reminder['id']}"
-                            update_data = {"sent": True}
-                            requests.patch(update_url, json=update_data, headers=SUPABASE_HEADERS)
-                            print(f"Marked reminder {reminder['id']} as sent")
+                        if email_sent:
+                            # Mark as sent
+                            update_query = text("""
+                                UPDATE notification_reminders
+                                SET sent = true, sent_at = NOW()
+                                WHERE id = :reminder_id
+                            """)
+                            db.execute(update_query, {"reminder_id": reminder_id})
+                            db.commit()
+                            print(f"Marked reminder {reminder_id} as sent")
         
         print("Done checking deadlines")
         
@@ -149,6 +145,8 @@ def check_and_send_reminders():
         print(f"Error: {e}")
         import traceback
         traceback.print_exc()
+    finally:
+        db.close()
 
 def main():
     """Run forever, checking every 5 minutes"""

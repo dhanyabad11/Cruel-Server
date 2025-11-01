@@ -20,7 +20,10 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
-    # Supabase Settings
+    # Database Settings (Neon PostgreSQL)
+    DATABASE_URL: str = ""
+    
+    # Supabase Settings (Legacy - can be removed)
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_KEY: str = ""
