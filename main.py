@@ -2,7 +2,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from app.routes import auth_router as auth_routes
 from app.routes import deadline_routes, notification_routes, whatsapp_routes, portal_routes, task_routes, notification_settings_routes
 from app.config import settings
 from app.services.notification_service import initialize_notification_service
@@ -42,8 +41,7 @@ try:
 except Exception as e:
     logger.warning(f"Failed to initialize notification service: {e}")
 
-# Include routers
-app.include_router(auth_routes, prefix="/api/auth", tags=["authentication"])
+# Include routers (NO AUTH - simplified)
 app.include_router(deadline_routes.router, prefix="/api/deadlines", tags=["deadlines"])
 app.include_router(notification_routes.router, prefix="/api/notifications", tags=["notifications"])
 app.include_router(notification_settings_routes.router, tags=["notification-settings"])

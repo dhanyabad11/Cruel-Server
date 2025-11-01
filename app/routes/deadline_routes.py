@@ -1,36 +1,40 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone, timedelta
-from supabase import Client
-from app.database import get_supabase_client, get_supabase_admin
-from app.models.user import User
-from app.models.deadline import StatusLevel
-from app.schemas.deadline import DeadlineCreate, DeadlineUpdate, DeadlineResponse, DeadlineStats
-from app.auth_deps import get_current_user
+"""
+Deadline Routes using Neon PostgreSQL (No Authentication)
+"""
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from sqlalchemy.orm import Session
+from sqlalchemy import text
+from typing import List, Optional
+from datetime import datetime
+from app.neon_database import get_db
 from app.services.email_service import send_email
 
 router = APIRouter(tags=["deadlines"])
 
-async def schedule_email_reminders(deadline_id: int, user_email: str, deadline_title: str, deadline_date: str, supabase: Client):
+# Default user ID (since no auth)
+DEFAULT_USER_ID = 1
+
+async def schedule_email_reminders(deadline_id: int, user_email: str, db: Session):
     """Schedule email reminders based on user settings"""
     try:
-        # Get user's notification settings
-        settings = supabase.table('notification_settings').select('*').eq('user_id', deadline_id).execute()
+        # Create default reminder records in database
+        reminder_types = ['1_hour', '1_day']  # Default reminders
         
-        if settings.data and settings.data[0].get('email_enabled'):
-            # Create reminder records in database
-            reminder_types = ['1_hour', '1_day']  # Default reminders
-            
-            for reminder_type in reminder_types:
-                supabase.table('notification_reminders').insert({
-                    'deadline_id': deadline_id,
-                    'reminder_type': reminder_type,
-                    'sent': False
-                }).execute()
-            
-            print(f"✓ Scheduled {len(reminder_types)} email reminders for deadline: {deadline_title}")
+        for reminder_type in reminder_types:
+            query = text("""
+                INSERT INTO notification_reminders (deadline_id, reminder_type, sent)
+                VALUES (:deadline_id, :reminder_type, false)
+            """)
+            db.execute(query, {
+                "deadline_id": deadline_id,
+                "reminder_type": reminder_type
+            })
+        
+        db.commit()
+        print(f"✓ Scheduled {len(reminder_types)} email reminders for deadline {deadline_id}")
     except Exception as e:
         print(f"✗ Failed to schedule reminders: {e}")
+        db.rollback()
 
 @router.get("/")
 async def get_deadlines(
@@ -38,196 +42,268 @@ async def get_deadlines(
     limit: int = Query(100, ge=1, le=100),
     status: Optional[str] = Query(None),
     priority: Optional[str] = Query(None),
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_client)
+    db: Session = Depends(get_db)
 ):
-    """Get all deadlines for the current user from Supabase"""
+    """Get all deadlines for the default user"""
     try:
-        print(f"DEBUG: Current user in deadlines: {current_user}")
+        query = """
+            SELECT id, title, description, due_date, priority, status, 
+                   created_at, updated_at, deadline_date
+            FROM deadlines
+            WHERE user_id = :user_id
+        """
         
-        # Get deadlines from Supabase database
-        query = supabase.table('deadlines').select('*').eq('user_id', current_user['id'])
+        params = {"user_id": DEFAULT_USER_ID}
         
         if status:
-            query = query.eq('status', status)
-        if priority:
-            query = query.eq('priority', priority)
+            query += " AND status = :status"
+            params["status"] = status
             
-        query = query.range(skip, skip + limit - 1).order('created_at', desc=True)
-        result = query.execute()
+        if priority:
+            query += " AND priority = :priority"
+            params["priority"] = priority
         
-        deadlines = result.data or []
+        query += " ORDER BY created_at DESC LIMIT :limit OFFSET :skip"
+        params["limit"] = limit
+        params["skip"] = skip
+        
+        result = db.execute(text(query), params)
+        deadlines = []
+        
+        for row in result:
+            deadlines.append({
+                "id": row[0],
+                "title": row[1],
+                "description": row[2],
+                "due_date": row[3].isoformat() if row[3] else None,
+                "priority": row[4],
+                "status": row[5],
+                "created_at": row[6].isoformat() if row[6] else None,
+                "updated_at": row[7].isoformat() if row[7] else None,
+                "deadline_date": row[8].isoformat() if row[8] else None,
+            })
+        
         print(f"DEBUG: Retrieved {len(deadlines)} deadlines from database")
-        
-        # Return the deadlines in the format expected by frontend
         return deadlines
         
     except Exception as e:
-        print(f"ERROR: Database error in deadlines endpoint: {e}")
-        raise HTTPException(status_code=500, detail="Database error. Please check your Supabase configuration.")
+        print(f"ERROR: Database error: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 @router.post("/")
 async def create_deadline(
     deadline_data: dict,
     background_tasks: BackgroundTasks,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_client)
+    db: Session = Depends(get_db)
 ):
-    """Create a new deadline in Supabase database"""
+    """Create a new deadline in Neon database"""
     try:
-        print(f"DEBUG: Creating deadline for user: {current_user}")
+        print(f"DEBUG: Creating deadline")
         print(f"DEBUG: Raw deadline data: {deadline_data}")
         
-        # Prepare data for database insertion
-        insert_data = {
-            "user_id": current_user['id'],
+        # Get user email for reminders
+        user_query = text("SELECT email FROM users WHERE id = :user_id")
+        user_result = db.execute(user_query, {"user_id": DEFAULT_USER_ID}).first()
+        user_email = user_result[0] if user_result else None
+        
+        # Insert into database
+        insert_query = text("""
+            INSERT INTO deadlines (user_id, title, description, due_date, priority, status)
+            VALUES (:user_id, :title, :description, :due_date, :priority, :status)
+            RETURNING id, title, description, due_date, priority, status, created_at
+        """)
+        
+        result = db.execute(insert_query, {
+            "user_id": DEFAULT_USER_ID,
             "title": deadline_data.get("title", ""),
             "description": deadline_data.get("description", ""),
             "due_date": deadline_data.get("due_date", ""),
             "priority": deadline_data.get("priority", "medium"),
             "status": "pending"
+        })
+        
+        db.commit()
+        
+        row = result.first()
+        created_deadline = {
+            "id": row[0],
+            "title": row[1],
+            "description": row[2],
+            "due_date": row[3].isoformat() if row[3] else None,
+            "priority": row[4],
+            "status": row[5],
+            "created_at": row[6].isoformat() if row[6] else None,
         }
         
-        print(f"DEBUG: Inserting into database: {insert_data}")
-        
-        # Insert into Supabase
-        result = supabase.table('deadlines').insert(insert_data).execute()
-        
-        if not result.data:
-            raise HTTPException(status_code=500, detail="Failed to create deadline in database")
-            
-        created_deadline = result.data[0]
         print(f"DEBUG: Successfully created deadline: {created_deadline}")
         
         # Schedule email reminders in background
-        background_tasks.add_task(
-            schedule_email_reminders,
-            created_deadline['id'],
-            current_user.get('email'),
-            created_deadline['title'],
-            created_deadline['due_date'],
-            supabase
-        )
+        if user_email:
+            background_tasks.add_task(
+                schedule_email_reminders,
+                created_deadline['id'],
+                user_email,
+                db
+            )
         
         return created_deadline
         
     except Exception as e:
+        db.rollback()
         print(f"ERROR: Failed to create deadline: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create deadline. Please check your database configuration.")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create deadline: {str(e)}")
 
-@router.get("/{deadline_id}", response_model=DeadlineResponse)
+@router.get("/{deadline_id}")
 async def get_deadline(
     deadline_id: int,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_client)
+    db: Session = Depends(get_db)
 ):
-    """Get a specific deadline by ID from Supabase"""
-    result = supabase.table('deadlines').select('*').eq('id', deadline_id).eq('user_id', current_user['id']).execute()
-    if not result.data:
+    """Get a specific deadline by ID"""
+    query = text("""
+        SELECT id, title, description, due_date, priority, status, created_at, updated_at
+        FROM deadlines
+        WHERE id = :deadline_id AND user_id = :user_id
+    """)
+    
+    result = db.execute(query, {
+        "deadline_id": deadline_id,
+        "user_id": DEFAULT_USER_ID
+    }).first()
+    
+    if not result:
         raise HTTPException(status_code=404, detail="Deadline not found")
-    deadline = result.data[0]
-    return DeadlineResponse(**deadline)
+    
+    return {
+        "id": result[0],
+        "title": result[1],
+        "description": result[2],
+        "due_date": result[3].isoformat() if result[3] else None,
+        "priority": result[4],
+        "status": result[5],
+        "created_at": result[6].isoformat() if result[6] else None,
+        "updated_at": result[7].isoformat() if result[7] else None,
+    }
 
 @router.put("/{deadline_id}")
 async def update_deadline(
     deadline_id: int,
     deadline_data: dict,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_client)
+    db: Session = Depends(get_db)
 ):
-    """Update a deadline in Supabase"""
+    """Update a deadline in Neon"""
     try:
-        print(f"DEBUG: Updating deadline {deadline_id} for user: {current_user['id']}")
-        print(f"DEBUG: Update data: {deadline_data}")
+        # Build update query dynamically
+        update_fields = []
+        params = {"deadline_id": deadline_id, "user_id": DEFAULT_USER_ID}
         
-        # Prepare update data, excluding None values
-        update_data = {k: v for k, v in deadline_data.items() if v is not None}
-        update_data['updated_at'] = datetime.now().isoformat()
+        if "title" in deadline_data:
+            update_fields.append("title = :title")
+            params["title"] = deadline_data["title"]
+        if "description" in deadline_data:
+            update_fields.append("description = :description")
+            params["description"] = deadline_data["description"]
+        if "due_date" in deadline_data:
+            update_fields.append("due_date = :due_date")
+            params["due_date"] = deadline_data["due_date"]
+        if "priority" in deadline_data:
+            update_fields.append("priority = :priority")
+            params["priority"] = deadline_data["priority"]
+        if "status" in deadline_data:
+            update_fields.append("status = :status")
+            params["status"] = deadline_data["status"]
         
-        print(f"DEBUG: Final update data: {update_data}")
+        if not update_fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
         
-        # Update in Supabase
-        result = supabase.table('deadlines').update(update_data).eq('id', deadline_id).eq('user_id', current_user['id']).execute()
+        update_fields.append("updated_at = NOW()")
         
-        # Supabase returns empty array on successful update, need to fetch the updated record
-        if result.data is not None:
-            # Fetch the updated deadline
-            fetch_result = supabase.table('deadlines').select('*').eq('id', deadline_id).eq('user_id', current_user['id']).execute()
-            if not fetch_result.data:
-                raise HTTPException(status_code=404, detail="Deadline not found after update")
-            updated_deadline = fetch_result.data[0]
-            print(f"DEBUG: Successfully updated deadline: {updated_deadline}")
-            return updated_deadline
-        else:
-            raise HTTPException(status_code=404, detail="Deadline not found or update failed")
+        query = text(f"""
+            UPDATE deadlines
+            SET {', '.join(update_fields)}
+            WHERE id = :deadline_id AND user_id = :user_id
+            RETURNING id, title, description, due_date, priority, status, created_at, updated_at
+        """)
+        
+        result = db.execute(query, params)
+        db.commit()
+        
+        row = result.first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Deadline not found")
+        
+        return {
+            "id": row[0],
+            "title": row[1],
+            "description": row[2],
+            "due_date": row[3].isoformat() if row[3] else None,
+            "priority": row[4],
+            "status": row[5],
+            "created_at": row[6].isoformat() if row[6] else None,
+            "updated_at": row[7].isoformat() if row[7] else None,
+        }
         
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         print(f"ERROR: Failed to update deadline: {e}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to update deadline: {str(e)}")
 
 @router.delete("/{deadline_id}")
 async def delete_deadline(
     deadline_id: int,
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_client)
+    db: Session = Depends(get_db)
 ):
-    """Delete a deadline from Supabase"""
+    """Delete a deadline from Neon"""
     try:
-        print(f"DEBUG: Deleting deadline {deadline_id} for user: {current_user['id']}")
+        query = text("""
+            DELETE FROM deadlines
+            WHERE id = :deadline_id AND user_id = :user_id
+            RETURNING id
+        """)
         
-        # First check if deadline exists
-        check_result = supabase.table('deadlines').select('id').eq('id', deadline_id).eq('user_id', current_user['id']).execute()
+        result = db.execute(query, {
+            "deadline_id": deadline_id,
+            "user_id": DEFAULT_USER_ID
+        })
+        db.commit()
         
-        if not check_result.data:
+        if not result.first():
             raise HTTPException(status_code=404, detail="Deadline not found")
         
-        # Now delete it - Supabase returns empty array on successful delete
-        result = supabase.table('deadlines').delete().eq('id', deadline_id).eq('user_id', current_user['id']).execute()
-        
-        # Check if delete was successful (result should not be None)
-        if result.data is not None:
-            print(f"DEBUG: Successfully deleted deadline: {deadline_id}")
-            return {"message": "Deadline deleted successfully"}
-        else:
-            raise HTTPException(status_code=500, detail="Failed to delete deadline")
+        return {"message": "Deadline deleted successfully"}
         
     except HTTPException:
         raise
     except Exception as e:
+        db.rollback()
         print(f"ERROR: Failed to delete deadline: {e}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to delete deadline: {str(e)}")
 
-@router.get("/stats/overview", response_model=DeadlineStats)
-async def get_deadline_stats(
-    current_user: Dict[str, Any] = Depends(get_current_user),
-    supabase: Client = Depends(get_supabase_client)
-):
-    """Get deadline statistics for the current user from Supabase"""
-    result = supabase.table('deadlines').select('*').eq('user_id', current_user['id']).execute()
-    deadlines = result.data or []
-    total = len(deadlines)
-    pending = sum(1 for d in deadlines if d.get('status') == StatusLevel.PENDING.value)
-    in_progress = sum(1 for d in deadlines if d.get('status') == StatusLevel.IN_PROGRESS.value)
-    completed = sum(1 for d in deadlines if d.get('status') == StatusLevel.COMPLETED.value)
-    overdue = sum(1 for d in deadlines if d.get('status') == StatusLevel.OVERDUE.value)
-    now = datetime.now(timezone.utc)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    today_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-    week_end = today_end + timedelta(days=7)
-    due_today = sum(1 for d in deadlines if d.get('due_date') and today_start <= datetime.fromisoformat(d['due_date']) <= today_end and d.get('status') != StatusLevel.COMPLETED.value)
-    due_this_week = sum(1 for d in deadlines if d.get('due_date') and now <= datetime.fromisoformat(d['due_date']) <= week_end and d.get('status') != StatusLevel.COMPLETED.value)
-    return DeadlineStats(
-        total=total,
-        pending=pending,
-        in_progress=in_progress,
-        completed=completed,
-        overdue=overdue,
-        due_today=due_today,
-        due_this_week=due_this_week
-    )
+@router.get("/stats/overview")
+async def get_deadline_stats(db: Session = Depends(get_db)):
+    """Get deadline statistics"""
+    query = text("""
+        SELECT
+            COUNT(*) as total,
+            COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
+            COUNT(CASE WHEN status = 'in_progress' THEN 1 END) as in_progress,
+            COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed,
+            COUNT(CASE WHEN status = 'overdue' THEN 1 END) as overdue
+        FROM deadlines
+        WHERE user_id = :user_id
+    """)
+    
+    result = db.execute(query, {"user_id": DEFAULT_USER_ID}).first()
+    
+    return {
+        "total": result[0] or 0,
+        "pending": result[1] or 0,
+        "in_progress": result[2] or 0,
+        "completed": result[3] or 0,
+        "overdue": result[4] or 0,
+        "due_today": 0,  # TODO: Calculate
+        "due_this_week": 0  # TODO: Calculate
+    }
