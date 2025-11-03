@@ -16,23 +16,23 @@ jobs:
               with:
                   host: ${{ secrets.DO_HOST }}
                   username: ${{ secrets.DO_USERNAME }}
-                  password: ${{ secrets.DO_PASSWORD }}
+                  key: ${{ secrets.DO_SSH_KEY }}
                   script: |
                       cd ~/ai-cruel-backend-updated
                       echo "📥 Pulling latest code..."
                       git pull origin main
-                      
+
                       echo "🛑 Stopping old processes..."
                       pkill -f 'python3 simple_email_reminder.py' || true
                       pkill -f uvicorn || true
                       sleep 2
-                      
+
                       echo "� Starting email reminder..."
                       nohup python3 simple_email_reminder.py > email_reminders.log 2>&1 &
-                      
+
                       echo "🚀 Starting backend..."
                       nohup uvicorn main:app --host 0.0.0.0 --port 8000 > backend.log 2>&1 &
-                      
+
                       sleep 3
                       echo "✅ Deployment complete!"
                       ps aux | grep -E 'uvicorn|simple_email' | grep -v grep
