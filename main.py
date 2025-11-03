@@ -34,7 +34,7 @@ app.include_router(notification_settings_routes.router, tags=["notification-sett
 
 @app.get("/")
 async def root():
-    return {"message": "AI Cruel - Deadline Manager API", "version": "2.0.0", "database": "Neon PostgreSQL"}
+    return {"message": "AI Cruel - Deadline Manager API", "version": "2.0.0", "database": "Neon PostgreSQL", "auto_deploy": "enabled"}
 
 @app.get("/health")
 async def health_check():
