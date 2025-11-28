@@ -69,3 +69,6 @@ htmlcov/
 .cache/
 .mypy_cache/
 .dmypy.json
+# Celery runtime files
+celerybeat-schedule
+*.log
